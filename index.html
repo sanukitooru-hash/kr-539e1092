@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<title>Private</title>
+<!-- パスワードを入れると、暗号化されたファイル(d/*.bin)をブラウザの中で元に戻して表示する。
+     暗号: PBKDF2-SHA256 + AES-256-GCM(encrypt.mjs と同じ)。外部のスクリプトは読み込まない。 -->
+<style>
+  :root { --bg:#0e0e0e; --fg:#eee; --mute:#9a9a9a; --line:#2a2a2a; }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,'Hiragino Sans',sans-serif; }
+  .gate { min-height:100svh; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .gate form { width:100%; max-width:360px; background:#151515; border:1px solid var(--line); border-radius:12px; padding:24px; }
+  .gate h1 { font-size:16px; margin:0 0 16px; }
+  .gate input { width:100%; min-height:44px; background:#0b0b0b; color:var(--fg); border:1px solid #333; border-radius:8px; padding:10px 12px; font-size:16px; }
+  .gate button, .ctl button { min-height:44px; background:#1c1c1c; color:var(--fg); border:1px solid #444; border-radius:8px; padding:8px 16px; font-size:15px; cursor:pointer; transition:border-color .15s, background-color .15s; }
+  .gate button { width:100%; margin-top:12px; }
+  button:hover { border-color:#777; background:#232323; }
+  :focus-visible { outline:2px solid #fff; outline-offset:2px; }
+  .msg { color:var(--mute); font-size:13px; margin-top:10px; min-height:1.4em; }
+  .msg.err { color:#ff8a8a; }
+  .wrap { padding:20px; max-width:1400px; margin:0 auto; }
+  .wrap h2 { font-size:20px; margin:0 0 6px; text-wrap:balance; }
+  .meta { color:var(--mute); font-size:13px; line-height:1.6; margin:0 0 20px; }
+  .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:20px; }
+  .card { background:#151515; border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h3 { font-size:15px; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  a.v { display:block; position:relative; aspect-ratio:9/16; border-radius:6px; overflow:hidden; background:#000; }
+  a.v video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block; }
+  .hint { position:absolute; right:8px; bottom:8px; background:rgba(0,0,0,.7); color:#fff; font-size:11px; padding:4px 8px; border-radius:4px; pointer-events:none; }
+  .info { font-size:12px; color:var(--mute); margin-top:8px; line-height:1.6; text-wrap:pretty; }
+  .info a { color:#7fd; }
+  .ctl { display:flex; gap:8px; margin-top:8px; }
+  /* スマホ(820px以下)は1列に縦並び。1本が画面の高さに収まる大きさ */
+  @media (max-width: 820px) {
+    .wrap { padding:16px; }
+    .grid { grid-template-columns:1fr; gap:24px; }
+    .card { width:100%; max-width:min(100%, calc((100svh - 160px) * 9 / 16 + 24px)); justify-self:center; }
+  }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <form id="f" autocomplete="off">
+    <h1>パスワードを入力してください</h1>
+    <input id="pw" type="password" autocomplete="current-password" aria-label="パスワード" required>
+    <button type="submit">開く</button>
+    <div class="msg" id="msg" role="status"></div>
+  </form>
+</div>
+<main class="wrap" id="app" hidden></main>
+<script>
+const $ = (s) => document.querySelector(s);
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+let KEY = null;
+
+async function deriveKey(pw, m) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64(m.salt), iterations: m.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+}
+async function dec(path) {
+  const buf = new Uint8Array(await (await fetch(path, { cache: 'no-store' })).arrayBuffer());
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, KEY, buf.slice(12));
+}
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+$('#f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = $('#msg'); msg.className = 'msg'; msg.textContent = '確認しています…';
+  try {
+    const m = await (await fetch('manifest.json', { cache: 'no-store' })).json();
+    KEY = await deriveKey($('#pw').value, m);
+    let cfg;
+    try { cfg = JSON.parse(new TextDecoder().decode(await dec(m.cfg))); }
+    catch (err) { msg.className = 'msg err'; msg.textContent = 'パスワードが違います。'; KEY = null; return; }
+    $('#pw').value = '';
+    render(cfg);
+  } catch (err) { msg.className = 'msg err'; msg.textContent = '読み込めませんでした。通信を確かめて、もう一度お試しください。'; }
+});
+
+function render(cfg) {
+  document.title = cfg.title;
+  const app = $('#app');
+  app.innerHTML = `<h2>${esc(cfg.title)}</h2><p class="meta">${esc(cfg.meta)}<br>動画をタップすると、元のシート(Google Drive)が開きます。音声はありません。</p><div class="grid"></div>`;
+  const grid = app.querySelector('.grid');
+  cfg.videos.forEach((v, i) => {
+    const c = document.createElement('section'); c.className = 'card';
+    c.innerHTML = `<h3><span class="dot" style="background:${esc(v.color)}"></span>${esc(v.title)}</h3>
+      <a class="v" href="${esc(v.url)}" target="_blank" rel="noopener noreferrer" aria-label="${esc(v.title)} の元のシート(${esc(v.sheet)})を開く">
+        <video muted loop playsinline></video><span class="hint">読み込み中…</span></a>
+      <div class="ctl"><button type="button" aria-label="${esc(v.title)} を再生/一時停止">❚❚ 一時停止</button></div>
+      <div class="info">シート: ${esc(v.sheet)} ・ ${esc(v.sec)}秒</div>`;
+    grid.append(c);
+    const video = c.querySelector('video'), hint = c.querySelector('.hint'), btn = c.querySelector('button');
+    btn.onclick = () => { if (video.paused) { video.play(); btn.textContent = '❚❚ 一時停止'; } else { video.pause(); btn.textContent = '▶ 再生'; } };
+    // 動画は1本ずつ順に元に戻す(スマホのメモリを使いすぎないように)
+    c.dataset.bin = v.bin; c._v = video; c._hint = hint;
+  });
+  $('#gate').hidden = true; app.hidden = false;
+  (async () => {
+    for (const c of grid.children) {
+      try {
+        const blob = new Blob([await dec(c.dataset.bin)], { type: 'video/mp4' });
+        c._v.src = URL.createObjectURL(blob); c._v.play().catch(() => {});
+        c._hint.textContent = 'タップでシートへ';
+      } catch (err) { c._hint.textContent = '読み込めませんでした'; }
+    }
+  })();
+}
+</script>
+</body>
+</html>
